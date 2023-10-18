@@ -51,6 +51,9 @@ static QRecLevel level = QR_ECLEVEL_L;
 static QRencodeMode hint = QR_MODE_8;
 static unsigned char fg_color[4] = {0, 0, 0, 255};
 static unsigned char bg_color[4] = {255, 255, 255, 255};
+static unsigned char fg_tr_color[4] = {0, 0, 0, 0};
+static unsigned char bg_tr_color[4] = {255, 255, 255, 0};
+static int minimal_pixels = 0;
 
 static int verbose = 0;
 
@@ -95,6 +98,7 @@ static const struct option options[] = {
 	{"strict-version", no_argument      , &strict_versioning, 1},
 	{"foreground"    , required_argument, NULL, 'f'},
 	{"background"    , required_argument, NULL, 'b'},
+	{"minimal-pixels", no_argument      , &minimal_pixels, 1},
 	{"version"       , no_argument      , NULL, 'V'},
 	{"verbose"       , no_argument      , &verbose, 1},
 	{NULL, 0, NULL, 0}
@@ -155,6 +159,10 @@ static void usage(int help, int longopt, int status)
 "               specify foreground/background color in hexadecimal notation.\n"
 "               6-digit (RGB) or 8-digit (RGBA) form are supported.\n"
 "               Color output support available only in PNG, EPS and SVG.\n\n"
+"      --minimal-pixels\n"
+"               make less important pixels transparent.\n"
+"               This may make the result incompliant with the specifications.\n"
+"               Implies -t PNG32. Makes important pixels opaque.\n\n"
 "      --strict-version\n"
 "               disable automatic version number adjustment. If the input data is\n"
 "               too large for the specified version, the program exits with the\n"
@@ -297,20 +305,22 @@ static int writePNG(const QRcode *qrcode, const char *outfile, enum imageType ty
 	png_infop info_ptr;
 	png_colorp palette = NULL;
 	png_byte alpha_values[2];
-	unsigned char *row, *p, *q;
+	unsigned char *row, *tr_row, *p, *q;
 	int x, y, xx, yy, bit;
 	int realwidth;
+	int offset;
 
 	realwidth = (qrcode->width + margin * 2) * size;
 	if(type == PNG_TYPE) {
 		row = (unsigned char *)malloc((size_t)((realwidth + 7) / 8));
 	} else if(type == PNG32_TYPE) {
 		row = (unsigned char *)malloc((size_t)realwidth * 4);
+		tr_row = (unsigned char *)malloc((size_t)realwidth * 4);
 	} else {
 		fprintf(stderr, "Internal error.\n");
 		exit(EXIT_FAILURE);
 	}
-	if(row == NULL) {
+	if(row == NULL || tr_row == NULL) {
 		fprintf(stderr, "Failed to allocate memory.\n");
 		exit(EXIT_FAILURE);
 	}
@@ -431,16 +441,35 @@ static int writePNG(const QRcode *qrcode, const char *outfile, enum imageType ty
 		p = qrcode->data;
 		for(y = 0; y < qrcode->width; y++) {
 			fillRow(row, realwidth, bg_color);
+			fillRow(tr_row, realwidth, bg_color);
 			for(x = 0; x < qrcode->width; x++) {
 				for(xx = 0; xx < size; xx++) {
-					if(*p & 1) {
-						memcpy(&row[((margin + x) * size + xx) * 4], fg_color, 4);
+					offset = ((margin + x) * size + xx) * 4;
+					if(*p & 0xf0) {
+						memcpy(&row[offset], (*p & 1) ? fg_color : bg_color, 4);
+						memcpy(&tr_row[offset], (*p & 1) ? fg_color : bg_color, 4);
+					} else {
+						if(size / 3 <= xx && xx < 2 * size / 3) {
+							/* must be the specified color */
+							memcpy(&row[offset], (*p & 1) ? fg_color : bg_color, 4);
+							memcpy(&tr_row[offset], (*p & 1) ? fg_tr_color : bg_tr_color, 4);
+						} else {
+							/* can be transparent */
+							memcpy(&row[offset], (*p & 1) ? fg_tr_color : bg_tr_color, 4);
+							memcpy(&tr_row[offset], (*p & 1) ? fg_tr_color : bg_tr_color, 4);
+						}
 					}
 				}
 				p++;
 			}
-			for(yy = 0; yy < size; yy++) {
-				png_write_row(png_ptr, row);
+			for(yy = 0; yy < size / 3; yy++) {
+				png_write_row(png_ptr, tr_row);
+			}
+      for(; yy < 2 * size / 3; yy++) {
+			  png_write_row(png_ptr, row);
+      }
+			for(; yy < size; yy++) {
+				png_write_row(png_ptr, tr_row);
 			}
 		}
 		/* bottom margin */
@@ -1374,12 +1403,14 @@ int main(int argc, char **argv)
 					fprintf(stderr, "Invalid foreground color value.\n");
 					exit(EXIT_FAILURE);
 				}
+				memcpy(&fg_tr_color, &fg_color, sizeof(fg_tr_color));
 				break;
 			case 'b':
 				if(color_set(bg_color, optarg)) {
 					fprintf(stderr, "Invalid background color value.\n");
 					exit(EXIT_FAILURE);
 				}
+				memcpy(&bg_tr_color, &bg_color, sizeof(bg_tr_color));
 				break;
 			case 'V':
 				usage(0, 0, EXIT_SUCCESS);
@@ -1437,6 +1468,18 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Micro QR Code does not support structured symbols.\n");
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	if(minimal_pixels) {
+    if(size < 3) {
+			fprintf(stderr, "Module size must be 3 or more for transparent QR Code.\n");
+			exit(EXIT_FAILURE);
+    }
+		image_type = PNG32_TYPE;
+		fg_color[3] = 255;
+		fg_tr_color[3] = 0;
+		bg_color[3] = 255;
+		bg_tr_color[3] = 0;
 	}
 
 	if(structured) {
